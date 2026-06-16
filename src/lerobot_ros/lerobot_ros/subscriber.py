@@ -300,9 +300,12 @@ class Ros2Feature:
 
         ds_frame: Dict[str, torch.Tensor] = {}
 
-        # average out the high frequency measurements
-        for topic_name, tensors in frame.items():
-            topic = self.topics[topic_name]
+        # Iterate self.topics in TOML order: `frame` comes from the Rust
+        # FrameCollector's HashMap, whose iteration order is non-deterministic
+        # and scrambles the action column when multiple tag="action" topics
+        # are concatenated below.
+        for topic_name, topic in self.topics.items():
+            tensors = frame.get(topic_name, [])
             key = key_for_topic(topic)
             if len(tensors) == 0:
                 tensor = torch.zeros(
