@@ -153,7 +153,7 @@ class Ros2Feature:
         for topic_name, topic in self.topics.items():
             self.subscribers[topic_name] = self.node.create_subscription(
                 topic.msg_type(),
-                topic_name,
+                topic.ros_topic_name,
                 lambda msg, topic_name=topic_name: self._msg_callback(msg, topic_name),
                 topic.qos,
             )

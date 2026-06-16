@@ -18,6 +18,9 @@ class BaseTopic:
     def __init__(self, topic_name, qos, tag="observation", key=None):
         self.is_action = tag == "action"
         self.is_meta = tag == "meta"
+        # Keep the raw ROS topic name; the cleaned form below is used as a
+        # dataset column prefix but isn't a valid ROS topic name.
+        self.ros_topic_name = topic_name
         self.topic_name = clean_topic_name(topic_name)
         self.qos = qos
         self.key = key if key is not None else self.topic_name
