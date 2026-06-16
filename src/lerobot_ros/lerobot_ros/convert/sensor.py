@@ -127,14 +127,24 @@ class JointStateTopic(BaseTopic):
         }
 
     def to_tensor(self, joint_state: sensor_msgs.JointState) -> torch.Tensor:
-        """Convert a ROS JointState message to a PyTorch tensor."""
+        """Convert a ROS JointState message to a PyTorch tensor.
+
+        Reorders the message's values into the order declared by ``self.joints``
+        in the TOML config — the message's joint order is publisher-defined and
+        does not have to match the column order we want in the dataset.
+        """
+        name_to_idx = {name: i for i, name in enumerate(joint_state.name)}
+        indices = [name_to_idx[j] for j in self.joints]
         values = []
         if self.has_position:
-            values.append(np.array(joint_state.position, dtype=np.float32))
+            position = np.array(joint_state.position, dtype=np.float32)
+            values.append(position[indices])
         if self.has_velocity:
-            values.append(np.array(joint_state.velocity, dtype=np.float32))
+            velocity = np.array(joint_state.velocity, dtype=np.float32)
+            values.append(velocity[indices])
         if self.has_effort:
-            values.append(np.array(joint_state.effort, dtype=np.float32))
+            effort = np.array(joint_state.effort, dtype=np.float32)
+            values.append(effort[indices])
         return torch.tensor(
             np.stack(values, axis=0),
             dtype=torch.float32,
