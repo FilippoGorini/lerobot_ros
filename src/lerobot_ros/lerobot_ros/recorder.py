@@ -42,6 +42,7 @@ class Recorder:
         self.dataset_root = config.dataset_root
         self.fps = config.fps
         self.tolerance_s = config.tolerance_s
+        self.robot_type = config.robot_type
 
         self.node.create_service(NewDataset, "new_dataset", self.new_dataset_service)
         self.node.create_service(
@@ -263,6 +264,7 @@ class Recorder:
                 features=self.convertor.get_feature_description(),
                 root=os.path.abspath(os.path.join(self.dataset_root, dataset_name)),
                 tolerance_s=self.tolerance_s,
+                robot_type=self.robot_type,
             )
 
 
