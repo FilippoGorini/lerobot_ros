@@ -78,6 +78,10 @@ ros2 service call /end_episode lerobot_interfaces/srv/EndEpisode 'discard: true'
 # When you are done, store the episodes to your disk (this might take some time)
 ros2 service call /store_episodes std_srvs/srv/Trigger
 
+# Finalize the dataset: waits for the background encoding to finish, then writes
+# the metadata. Required before the dataset is complete and usable for training.
+ros2 service call /finalize_dataset std_srvs/srv/Trigger
+
 ```
 
 You can upload your datasets to huggingface, so they are available for training on different machines.

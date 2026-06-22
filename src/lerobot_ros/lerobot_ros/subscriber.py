@@ -51,6 +51,9 @@ class Ros2Feature:
     ):
         self.node = node
         self.frame_callback = None
+        # Optional callable returning True while an episode is being recorded.
+        # When False, _process_loop drops frames without converting them.
+        self.recording_predicate = None
 
         self.rerun_remote = rerun_remote
         self.visualize = visualize
@@ -254,6 +257,14 @@ class Ros2Feature:
 
             frame, t = item
 
+            # Skip the expensive image->tensor conversion when not recording:
+            # these frames are discarded downstream anyway, and decoding them at
+            # 30 Hz just steals CPU/GIL from the store/encode threads, which is
+            # what backs up proc_queue and triggers 'Frame queue full' drops.
+            if self.recording_predicate is not None and not self.recording_predicate():
+                self.proc_queue.task_done()
+                continue
+
             if self.use_rust_collector:
                 # Convert raw messages to tensors
                 converted_msgs = self._convert_raw_frame(frame)
@@ -339,6 +350,14 @@ class Ros2Feature:
         The callback should accept a single argument: the current frame.
         """
         self.frame_callback = callback
+
+    def register_recording_predicate(self, predicate):
+        """
+        Register a callable returning True while an episode is being recorded.
+        When it returns False, _process_loop drops queued frames without the
+        expensive tensor conversion, freeing CPU/GIL for store/encode threads.
+        """
+        self.recording_predicate = predicate
 
     def register_msg_callback(self, callback):
         """

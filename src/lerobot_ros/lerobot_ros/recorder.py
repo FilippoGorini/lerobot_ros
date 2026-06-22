@@ -66,6 +66,9 @@ class Recorder:
             visualize=self.visualize,
         )
         self.convertor.register_frame_callback(self._timer_callback)
+        # Let the subscriber skip the expensive image->tensor conversion while
+        # we're not recording (those frames are discarded here anyway).
+        self.convertor.register_recording_predicate(lambda: self.recording)
         self.convertor.setup_subscribers()
         self.convertor.running = True
         self.last_t = 0.0
@@ -85,10 +88,13 @@ class Recorder:
     def _timer_callback(self, frame, t):
         if self.last_t != 0.0:
             delta = t - self.last_t
-            error = 1.0 / self.fps - delta
-            if abs(error) > 1e-5:
+            # Only warn on a genuinely missed frame (gap of ~1.5+ periods).
+            # Sub-period scheduling jitter is normal and used to spam this every
+            # frame; a doubled gap means a tick/frame was actually dropped.
+            if delta > 1.5 / self.fps:
                 self.node.get_logger().warning(
-                    f"Received frame at time {t - self.last_t:.6f}s"
+                    f"Frame gap of {delta:.6f}s (expected {1.0 / self.fps:.6f}s); "
+                    "likely dropped frame(s)"
                 )
         self.last_t = t
         if not self.recording:
@@ -134,6 +140,9 @@ class Recorder:
         with self.out_frames_lock:
             self.out_frames = []
 
+        # Reset so the first frame of the episode doesn't compare against a
+        # stale pre-idle timestamp and log a bogus "dropped frame(s)" warning.
+        self.last_t = 0.0
         self.recording = True
 
         self.node.get_logger().info(f"Started episode for task: {self.task}")
