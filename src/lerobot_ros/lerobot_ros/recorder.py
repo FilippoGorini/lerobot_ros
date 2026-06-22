@@ -37,6 +37,9 @@ class Recorder:
         self.out_frames_lock = threading.Lock()
         self.out_frames = []
 
+        # Serializes store_thread: LeRobotDataset is not thread-safe (see store_thread).
+        self._store_lock = threading.Lock()
+
         self._last_call = None
 
         self.dataset_root = config.dataset_root
@@ -50,6 +53,7 @@ class Recorder:
         )
         self.node.create_service(EndEpisode, "end_episode", self.end_episode_service)
         self.node.create_service(Trigger, "store_episodes", self.store_episodes_service)
+        self.node.create_service(Trigger, "finalize_dataset", self.finalize_srv)
 
         self.frame_publisher = node.create_publisher(Int32, "frame", 10)
         self.episode_publisher = node.create_publisher(Int32, "episode", 10)
@@ -201,38 +205,83 @@ class Recorder:
                 "No dataset initialized, skipping episode storage."
             )
             return
-        while len(episodes) > 0:
-            episode = episodes.pop(0)
-            self.node.get_logger().info(f"Storing episode with {len(episode)} frames.")
-            frame0 = episode[0]
-            t0 = frame0[2]
-            for i, frame in enumerate(tqdm(episode, desc="Frame")):
-                try:
-                    frame, task, t = frame
-                    frame["task"] = task
-                    self.node.get_logger().debug(
-                        f"Storing frame {i} at time {t - t0:.5f}s"
-                    )
+        # add_frame/save_episode share a single episode_buffer and write images to
+        # paths keyed by episode_index; they are NOT thread-safe. /store_episodes
+        # spawns one store_thread per call, so two can overlap (especially at higher
+        # resolutions where saving is slow). Hold this lock so concurrent stores queue
+        # up here instead of racing and corrupting each other's image files.
+        with self._store_lock:
+            while len(episodes) > 0:
+                episode = episodes.pop(0)
+                self.node.get_logger().info(f"Storing episode with {len(episode)} frames.")
+                frame0 = episode[0]
+                t0 = frame0[2]
+                for i, frame in enumerate(tqdm(episode, desc="Frame")):
+                    try:
+                        frame, task, t = frame
+                        frame["task"] = task
+                        self.node.get_logger().debug(
+                            f"Storing frame {i} at time {t - t0:.5f}s"
+                        )
 
-                    self.dataset.add_frame(frame)
+                        self.dataset.add_frame(frame)
+                    except Exception as e:
+                        self.node.get_logger().error(f"Failed to add frame: {e}")
+                        continue
+                try:
+                    self.dataset.save_episode()
                 except Exception as e:
-                    self.node.get_logger().error(f"Failed to add frame: {e}")
+                    # save_episode pops 'size'/'task' off episode_buffer before the step
+                    # that can fail (e.g. a corrupt image). Drop the half-consumed buffer
+                    # so the next episode starts clean instead of KeyError('size') forever.
+                    self.node.get_logger().error(f"Failed to save episode: {e}")
+                    traceback.print_exc()
+                    self.dataset.episode_buffer = None
                     continue
-            try:
-                self.dataset.save_episode()
-            except ValueError as e:
-                self.node.get_logger().error(f"Failed to save episode: {e}")
-                traceback.print_exc()
-                continue
-            self.node.get_logger().info(f"Stored episode with {len(episode)} frames.")
-            del episode
+                self.node.get_logger().info(f"Stored episode with {len(episode)} frames.")
+                del episode
+
+    def finalize_srv(self, request: Trigger.Request, response: Trigger.Response):
+        try:
+            ds = self.finalize()
+            response.success = ds is not None
+            response.message = (
+                "Dataset finalized successfully."
+                if ds is not None
+                else "No dataset to finalize."
+            )
+        except Exception as e:
+            response.success = False
+            response.message = str(e)
+        return response
+
+    def _join_background_threads(self):
+        """Block until every in-flight episode-storage thread has finished."""
+        pending = [t for t in self._background_threads if t.is_alive()]
+        if pending:
+            self.node.get_logger().info(
+                f"Waiting for {len(pending)} episode-storage thread(s) to finish..."
+            )
+        for t in self._background_threads:
+            t.join()
+        self._background_threads = []
 
     def finalize(self):
         if self.dataset is None:
-            return
+            return None
 
-        self.node.get_logger().info("Finalized dataset")
+        # Make sure all queued/encoding episodes are fully written before we
+        # consolidate; otherwise the data parquet is closed mid-write and ends
+        # up without a footer (truncated/unreadable).
+        self._join_background_threads()
+
+        self.node.get_logger().info("Finalizing dataset...")
         self.dataset.finalize()
+        self.node.get_logger().info("Dataset finalized.")
+        ds = self.dataset
+        # Drop the handle so a later Ctrl-C / second finalize is a safe no-op.
+        self.dataset = None
+        return ds
 
     def new_dataset(self, dataset_name: str):
         """
