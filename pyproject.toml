@@ -8,6 +8,13 @@ dependencies = [
     "lerobot>=0.4.2,<0.5",
     "pytest>=9.0.2",
     "rust-py-timer>=0.1.0",
+    # scipy is imported opportunistically by HuggingFace `datasets` when
+    # loading existing parquet (e.g. appending episodes to a dataset). The
+    # venv uses --system-site-packages, which would otherwise leak in the
+    # system scipy (compiled against numpy 1.x) and crash under numpy 2.x
+    # with "numpy.core.multiarray failed to import". Pin a numpy-2-compatible
+    # scipy so the venv's own copy wins over the system one.
+    "scipy>=1.13",
 ]
 
 [project.optional-dependencies]

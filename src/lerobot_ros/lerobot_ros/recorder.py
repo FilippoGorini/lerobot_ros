@@ -18,6 +18,19 @@ from tqdm import tqdm
 from .config import ROSFeatureConfig, load_toml_dict, parse_config
 from .subscriber import Ros2Feature
 
+# A continuous revolute joint that rolls past ±π wraps to the opposite sign,
+# showing up as a ~2π (6.28 rad) jump between two consecutive 30 Hz frames.
+# Real teleop motion is <~0.3 rad/frame and the Kinova's max joint speed
+# (~1.4 rad/s -> ~0.05 rad/frame) can't cross this, so any state dim jumping
+# past this threshold is a wraparound, not real motion.
+WRAP_THRESHOLD_RAD = 5.0
+
+# Background PNG-writer threads per camera (LeRobot's recommendation). Without
+# them add_frame writes every PNG synchronously and storing an episode runs
+# slower than real time with 3 cameras (~20 fps vs 30 fps recording), so a
+# backlog of unsaved episodes piles up in RAM during back-to-back recording.
+IMAGE_WRITER_THREADS_PER_CAMERA = 4
+
 
 class Recorder:
     def __init__(self, node: Node, config: ROSFeatureConfig, subscriber_node: Node):
@@ -73,6 +86,16 @@ class Recorder:
         self.convertor.running = True
         self.last_t = 0.0
 
+        # Wraparound watch: names line up 1:1 with observation.state dims (e.g.
+        # "joint_1.position"). Reset per episode so the first frame never
+        # compares against a stale pre-episode pose.
+        self._state_names = (
+            self.convertor.get_feature_description()
+            .get("observation.state", {})
+            .get("names", [])
+        )
+        self._prev_state = None
+
         self._background_threads = []
 
     @property
@@ -100,9 +123,37 @@ class Recorder:
         if not self.recording:
             return
 
+        self._check_wraparound(frame)
+
         with self.out_frames_lock:
             assert self.out_frames is not None
             self.out_frames.append((frame, self.task, t))
+
+    def _check_wraparound(self, frame):
+        """Warn if any observation.state dim jumped by ~2π since the last frame.
+
+        A ±π wraparound silently corrupts the episode (the VLA sees a huge
+        discontinuity), so we log a warning the moment it happens: discard the
+        episode with `/end_episode 'discard: true'` and re-record it.
+        """
+        cur = frame.get("observation.state")
+        if cur is None:
+            return
+        prev = self._prev_state
+        self._prev_state = cur
+        if prev is None or cur.shape != prev.shape:
+            return
+
+        deltas = (cur - prev).abs()
+        for i in range(deltas.shape[0]):
+            d = deltas[i].item()
+            if d > WRAP_THRESHOLD_RAD:
+                name = self._state_names[i] if i < len(self._state_names) else f"state[{i}]"
+                self.node.get_logger().warning(
+                    f"WRAPAROUND on {name}: {prev[i].item():+.3f} -> "
+                    f"{cur[i].item():+.3f} rad (|Δ|={d:.3f}); discard this "
+                    "episode (/end_episode 'discard: true') and re-record it."
+                )
 
     def _convert_feature_name(self, topic_name: str) -> str:
         return topic_name.replace("/", "", 1).replace("/", ".")
@@ -141,8 +192,10 @@ class Recorder:
             self.out_frames = []
 
         # Reset so the first frame of the episode doesn't compare against a
-        # stale pre-idle timestamp and log a bogus "dropped frame(s)" warning.
+        # stale pre-idle timestamp/pose and log a bogus dropped-frame or
+        # wraparound warning.
         self.last_t = 0.0
+        self._prev_state = None
         self.recording = True
 
         self.node.get_logger().info(f"Started episode for task: {self.task}")
@@ -286,6 +339,8 @@ class Recorder:
 
         self.node.get_logger().info("Finalizing dataset...")
         self.dataset.finalize()
+        # Store threads are joined above, so the writer queue is empty
+        self.dataset.stop_image_writer()
         self.node.get_logger().info("Dataset finalized.")
         ds = self.dataset
         # Drop the handle so a later Ctrl-C / second finalize is a safe no-op.
@@ -313,6 +368,8 @@ class Recorder:
                     f"Dataset {dataset_name} already exists with different features. "
                     f"Expected: {features.keys()}, Found: {ds_features.keys()}"
                 )
+            # Reopening doesn't take image_writer_threads, start the writer explicitly
+            dataset.start_image_writer(num_threads=self._image_writer_threads())
             self.dataset = dataset
             self.node.get_logger().info(f"Using existing dataset: {dataset_name}")
         else:
@@ -323,7 +380,13 @@ class Recorder:
                 root=os.path.abspath(os.path.join(self.dataset_root, dataset_name)),
                 tolerance_s=self.tolerance_s,
                 robot_type=self.robot_type,
+                image_writer_threads=self._image_writer_threads(),
             )
+
+    def _image_writer_threads(self) -> int:
+        features = self.convertor.get_feature_description().values()
+        n_cameras = sum(f["dtype"] in ("image", "video") for f in features)
+        return IMAGE_WRITER_THREADS_PER_CAMERA * n_cameras
 
 
 def main():
