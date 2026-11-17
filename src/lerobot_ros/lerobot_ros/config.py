@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -116,7 +117,7 @@ def parse_config(config: dict) -> ROSFeatureConfig:
     """
     fps = config.get("fps", 20)
     tolerance_s = config.get("tolerance_s", 0.01)
-    dataset_root = config.get("dataset_root", "./datasets")
+    dataset_root = os.path.expanduser(config.get("dataset_root", "./datasets"))
 
     config_topics = config.get("topics", {})
 
